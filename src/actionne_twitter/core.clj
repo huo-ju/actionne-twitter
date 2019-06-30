@@ -5,7 +5,7 @@
             [twttr.auth :refer :all]
             [cheshire.core :refer :all]
     )
-    (:import (java.io BufferedWriter FileWriter))
+    (:import (java.io BufferedWriter FileWriter) (java.util Date Locale) )
 )
 
 (defn expand-home [s]
@@ -18,6 +18,10 @@
 
 (def today
     (.format (java.text.SimpleDateFormat. "yyyy-MM-dd") (new java.util.Date))
+)
+
+(def df 
+    (java.text.SimpleDateFormat. "EEE MMM dd HH:mm:ss ZZZZZ yyyy" (Locale. "english"))
 )
 
 (let [wtr (agent (BufferedWriter. (FileWriter. (str homedir "/data/" "actionne_twitter-" today ".log") true)))]
@@ -105,6 +109,14 @@
     )
 )
 
+(defn mediaurls [tweet]
+    (let [media (:media (:extended_entities tweet))]
+        (if (= nil media)
+            []
+            (vec (map :media_url media))
+        )
+    )
+)
 (defn fetchtweets [env session]
     ;(prn env)
     (let [creds (map->UserCredentials env) 
@@ -118,18 +130,23 @@
         (prn (timelineparams (loadsession)))
 
         (let [formattedtweets (let [tweets (api/statuses-user-timeline creds :params (merge {:screen_name screen_name} (timelineparams (loadsession))))]
+
+
+
                 (map (fn [tweet] 
                         (let [  favorite_count (:favorite_count tweet) 
                                 id (:id_str tweet) 
                                 retweet_count (:retweet_count tweet)  
-                                text (:text tweet)  
+                                text (:text tweet)
+                                created_at (.getTime  (.parse df (:created_at tweet)))
+                                media_urls (mediaurls tweet)
                                 in_reply_to_status_id (:in_reply_to_status_id tweet)
                                 in_reply_to_user_id (:in_reply_to_user_id tweet)
-
                              ]
 
                            {:id id 
-                            :object {:favorite_count favorite_count :retweet_count retweet_count :text text
+                            :object {:favorite_count favorite_count :retweet_count retweet_count :text text :created_at created_at 
+                                     :media_urls media_urls
                                      :category (if (or (not (nil? in_reply_to_status_id))  (not (nil? in_reply_to_user_id)))
                                         "reply"
                                         "tweet")} 
