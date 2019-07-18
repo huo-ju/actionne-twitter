@@ -4,6 +4,8 @@
             [twttr.api :as api]
             [twttr.auth :refer :all]
             [cheshire.core :refer :all]
+            [clj-http.client :as client]
+            [clojure.java.io :as io]
     )
     (:import (java.io BufferedWriter FileWriter) (java.util Date Locale) )
 )
@@ -77,12 +79,17 @@
 
 (defn backup [original]
     (println (str "save.." (:id original)))
-    ;(if (contains? (:entities original) :media)
-    ;    (do (println "===media")
-    ;    (prn (:media (:entities original))))
-    ;)
-    (save (generate-string original))
-    (save "\n")
+    (let [urls  (mediaurls original)]
+        (let [result (mapv (fn [url] 
+            (download url (str homedir "/data/" (:id original) "_" (#(nth % (dec (count %))) (clojure.string/split url #"/"))))
+        ) urls)]
+            (if (= nil (some #(= false %) result))
+                (do (save (generate-string original))
+                    (save "\n"))
+                (println (str "backup error:"  (:id original)))        
+            )
+        )
+    )
 )
 
 (defn delete [id original]
@@ -174,11 +181,30 @@
     )
 )
 
+(defn- httprequest [url]
+  (let [req (client/get url {:as :stream :throw-exceptions false})]
+    (if (= (:status req) 200)
+      (:body req))))
+
+(defn download [url filename]
+    (println (str "download: "  url))
+    (let [body  (httprequest url)]
+        (if (not= nil body)
+            (if (= nil (io/copy (httprequest url) (java.io.File. filename)))
+                true
+                false
+            )
+            false
+        )
+    )
+)
 
 (defn run [env]
     (println "run")
     (let [session (loadsession)]
-       (fetchtweets env session)
+       (let [tweets (fetchtweets env session)]
+        (backup (:original (second tweets)))
+       )
        ;(if (= (:last_id (loadsession)) nil) (println "nil") (println "id"))
     )
 
