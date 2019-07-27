@@ -77,12 +77,42 @@
     ))
 
 
+(defn mediaurls [tweet]
+    (let [media (:media (:extended_entities tweet))]
+        (if (= nil media)
+            []
+            (vec (map :media_url media))
+        )
+    )
+)
+
+(defn- httprequest [url]
+  (let [req (client/get url {:as :stream :throw-exceptions false})]
+    (if (= (:status req) 200)
+      (:body req))))
+
+(defn download [url filename]
+    (println (str "download: "  url))
+    (let [body  (httprequest url)]
+        (if (not= nil body)
+            (if (= nil (io/copy (httprequest url) (java.io.File. filename)))
+                true
+                false
+            )
+            false
+        )
+    )
+)
+
 (defn backup [original]
     (println (str "save.." (:id original)))
     (let [urls  (mediaurls original)]
+        (println (str "download .. "))
         (let [result (mapv (fn [url] 
             (download url (str homedir "/data/" (:id original) "_" (#(nth % (dec (count %))) (clojure.string/split url #"/"))))
         ) urls)]
+            (println (str "save string .. "))
+            (prn result)
             (if (= nil (some #(= false %) result))
                 (do (save (generate-string original))
                     (save "\n"))
@@ -116,14 +146,6 @@
     )
 )
 
-(defn mediaurls [tweet]
-    (let [media (:media (:extended_entities tweet))]
-        (if (= nil media)
-            []
-            (vec (map :media_url media))
-        )
-    )
-)
 (defn fetchtweets [env session]
     ;(prn env)
     (let [creds (map->UserCredentials env) 
@@ -181,30 +203,15 @@
     )
 )
 
-(defn- httprequest [url]
-  (let [req (client/get url {:as :stream :throw-exceptions false})]
-    (if (= (:status req) 200)
-      (:body req))))
 
-(defn download [url filename]
-    (println (str "download: "  url))
-    (let [body  (httprequest url)]
-        (if (not= nil body)
-            (if (= nil (io/copy (httprequest url) (java.io.File. filename)))
-                true
-                false
-            )
-            false
-        )
-    )
-)
 
 (defn run [env]
     (println "run")
     (let [session (loadsession)]
-       (let [tweets (fetchtweets env session)]
-        (backup (:original (second tweets)))
-       )
+       (fetchtweets env session)
+       ;(let [tweets (fetchtweets env session)]
+       ; (backup (:original (second tweets)))
+       ;)
        ;(if (= (:last_id (loadsession)) nil) (println "nil") (println "id"))
     )
 
