@@ -1,5 +1,6 @@
 (ns actionne_twitter.core
     (:require
+            [clojure.tools.logging :as log]
             [config.core :refer [env]]
             [twttr.api :as api]
             [twttr.auth :refer :all]
@@ -36,24 +37,26 @@
       (defn close []
             (send wtr #(.close %))))
 
-(defn loadsession []
-    (let [filename (str homedir "/data/" "actionne_twitter-session.clj")]
+(defn loadsession [account]
+    (let [filename (str homedir "/data/" account "-actionne_twitter-session.clj")]
         (try
             (read-string (slurp filename))
             (catch Exception e {}))
     )
 )
 
-(defn updatesession [session]
-    (let [filename (str homedir "/data/" "actionne_twitter-session.clj")]
+(defn updatesession [account session]
+    (log/info (str "updatesession: " homedir "/data/" account "-actionne_twitter-session.clj"))
+    (log/info (str "session: " session))
+    (let [filename (str homedir "/data/" account "-actionne_twitter-session.clj")]
         (with-open [w (clojure.java.io/writer filename)]
             (binding [*out* w]
         (pr session)))
     )
 )
 
-(defn initsession []
-    (updatesession {:stage "init"})
+(defn initsession [account]
+    (updatesession account {:stage "init"})
 )
 
 (defn paramsname [stage]
@@ -64,13 +67,12 @@
 )
 
 (defn timelineparams [session]
-
     (if (= "init" (:stage session))
-        (if (not= (:pending session) nil)  ;init stage, with id
+        (if (not= (:confirmed session) nil)  ;init stage, with id
             {:max_id (:last_id (:confirmed session))}
             {} 
         )
-        (if (not= (:pending session) nil)  ;normal stage, with id
+        (if (not= (:confirmed session) nil)  ;normal stage, with id
             {:since_id (:last_id (:confirmed session))}
             {} 
         )
@@ -79,23 +81,23 @@
 
 (defn mediaurls [tweet]
     (let [media (:media (:extended_entities tweet))]
-        (if (= nil media)
+        (if (not (nil? media))
+            (vec (map :media_url_https media))
             []
-            (vec (map :media_url media))
         )
     )
 )
 
-(defn- httprequest [url]
-  (let [req (client/get url {:as :stream :throw-exceptions false})]
+(defn httprequest [url]
+  (let [req (client/get url {:as :byte-array :throw-exceptions false})]
     (if (= (:status req) 200)
-      (:body req))))
+      (:body req)))
+)
 
 (defn download [url filename]
-    (println (str "download: "  url))
-    (let [body  (httprequest url)]
+    (let [body (httprequest url)]
         (if (not= nil body)
-            (if (= nil (io/copy (httprequest url) (java.io.File. filename)))
+            (if (= nil (io/copy body (java.io.File. filename)))
                 true
                 false
             )
@@ -105,39 +107,33 @@
 )
 
 (defn backup [original]
-    (println (str "save.." (:id original)))
-    (let [urls  (mediaurls original)]
-        (println (str "download .. "))
+    (log/info (str "backup: " (:id original)))
+    (let [urls (mediaurls original)]
         (let [result (mapv (fn [url] 
             (download url (str homedir "/data/" (:id original) "_" (#(nth % (dec (count %))) (clojure.string/split url #"/"))))
         ) urls)]
-            (println (str "save string .. "))
-            (prn result)
             (if (= nil (some #(= false %) result))
                 (do (save (generate-string original))
                     (save "\n"))
-                (println (str "backup error:"  (:id original)))        
+                (log/error (str "backup error: " (:id original)))
             )
         )
     )
 )
 
 (defn delete [id original]
-    (println (str "twitter delete: " id))
-
+    (log/info (str "delete: " (:id original)))
 )
 
-(defn done []
-    (close)
-)
+;(defn done []
+;    (close)
+;)
 
 
 (defn notify [id original]
-    (println (str "twitter notify: " id))
-    (println (str "twitter backup: " id))
+    (log/info (str "notifiy: " id))
     (backup original)
 )
-
 
 (defn lastid[session]
     (if (not= (:confirmed session) nil) 
@@ -148,17 +144,14 @@
 
 (defn fetchtweets [env session]
     ;(prn env)
-    (let [creds (map->UserCredentials env) 
-          screen_name (:screen_name env)]
+    (let [creds (map->UserCredentials env) screen_name (:screen_name env)]
         ;(if (= (:confirmed session) nil) 
         ;    ;{:screen_name (:screen_name env)} 
         ;    ;{:max_id (:last_id session) :screen_name (:screen_name env)}
         ;    (:confirmed (loadsession))
         ;)
-        (prn (lastid session))
-        (prn (timelineparams (loadsession)))
-
-        (let [formattedtweets (let [tweets (api/statuses-user-timeline creds :params (merge {:screen_name screen_name} (timelineparams (loadsession))))]
+        (log/info (str "fetch: " (merge {:screen_name screen_name} (timelineparams (loadsession screen_name)))))
+        (let [formattedtweets (let [tweets (api/statuses-user-timeline creds :params (merge {:screen_name screen_name} (timelineparams (loadsession screen_name))))]
 
 
 
@@ -182,10 +175,10 @@
                             :original tweet})) 
                 tweets)
             )]
+            (log/info (str "tweets count:" (count formattedtweets)))
             (if (> 0 (count formattedtweets))
-                (let [maxid (apply (resolve (symbol (paramsname (:stage (loadsession))))) (map read-string (map :id formattedtweets)))]
-                    (updatesession 
-                        (assoc session :pending {:last_id maxid})
+                (let [maxid (apply (resolve (symbol (paramsname (:stage (loadsession screen_name))))) (map read-string (map :id formattedtweets)))]
+                    (updatesession screen_name (assoc session :pending {:last_id maxid})
                     )
                 )
             )
@@ -195,10 +188,10 @@
 )
 
 
-(defn confirmtask[]
-    (let [session (loadsession)]
+(defn confirmtask[env]
+    (let [session (loadsession (:screen_name env))]
         (if (not= (:pending session) nil) 
-           (updatesession (assoc session :confirmed (:pending session)))
+           (updatesession (:screen_name env) (assoc session :confirmed (:pending session)))
         )
     )
 )
@@ -206,13 +199,15 @@
 
 
 (defn run [env]
-    (println "run")
-    (let [session (loadsession)]
+
+    (log/info (str "plugin actionne_twitter running for account: " (:screen_name env)))
+    (let [session (loadsession (:screen_name env))]
        (fetchtweets env session)
        ;(let [tweets (fetchtweets env session)]
-       ; (backup (:original (second tweets)))
+       ;     (map (fn [tweet] 
+       ;         (backup (:original tweet))
+       ;     ) tweets)
        ;)
-       ;(if (= (:last_id (loadsession)) nil) (println "nil") (println "id"))
     )
 
 )
