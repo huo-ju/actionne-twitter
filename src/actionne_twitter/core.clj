@@ -7,8 +7,9 @@
             [cheshire.core :refer :all]
             [clj-http.client :as client]
             [clojure.java.io :as io]
+            [java-http-clj.core  :as http ]
     )
-    (:import (java.io BufferedWriter FileWriter) (java.util Date Locale) )
+    (:import (java.io BufferedWriter FileWriter) (java.util Date Locale) (java.net CookieManager ProxySelector URI) (org.jsoup Jsoup) (org.jsoup.select Elements) (org.jsoup.nodes Element))
 )
 
 (defn expand-home [s]
@@ -56,8 +57,8 @@
     )
 )
 
-(defn initsession [account]
-    (updatesession account {:stage "init"})
+(defn initsession [account watching]
+    (updatesession account {:stage "init" :watching watching})
 )
 
 (defn paramsname [stage]
@@ -70,11 +71,11 @@
 (defn timelineparams [session]
     (if (= "init" (:stage session))
         (if (not= (:confirmed session) nil)  ;init stage, with id
-            {:max_id (:last_id (:confirmed session))}
+            {:max_id (- (:last_id (:confirmed session)) 1)}
             {} 
         )
-        (if (not= (:confirmed session) nil)  ;normal stage, with id
-            {:since_id (:last_id (:confirmed session))}
+        (if (not= (:confirmed session) nil)  ;normal stage, with id 
+            {:since_id (+ (:last_id (:confirmed session)) 1)}
             {} 
         )
     ))
@@ -90,10 +91,51 @@
 )
 
 (defn httprequest [url]
-  (let [req (client/get url {:as :byte-array :throw-exceptions false})]
-    (if (= (:status req) 200)
-      (:body req)))
+  (let [resp (client/get url {:as :byte-array :throw-exceptions false})]
+    (if (= (:status resp) 200)
+      (:body resp)))
 )
+
+
+(def h {"User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.86 Safari/537.36" }) 
+
+(defn gettweets []
+    (let [cookie-handler (CookieManager.)]
+        (def client (http/build-client {:follow-redirects :normal :cookie-handler cookie-handler :headers {"User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.86 Safari/537.36" }}))
+        (let [resp (http/send {:uri "http://twitter.com/i/search/timeline?f=tweets&q=Babylon+5&max_position=TWEET-1158518806706155520-1158595382965936128" :method :get} {:client client})] 
+            (if (= (:status resp) 200)
+                (prn (parse-string (:body resp)))
+                ;(let [ elems (get-elems (:body resp) "")]
+                ;    (prn elems)
+                ;)
+            )
+        )
+    )
+  ;  (let [req (-> (HttpRequest/newBuilder)
+  ;        (.uri (URI/create "http://twitter.com/i/search/timeline?f=tweets&q=Babylon+5&max_position=TWEET-1158518806706155520-1158595382965936128"))
+  ;        (.GET)
+  ;        (.build))
+
+  ;    client (-> (HttpClient/newBuilder)
+  ;        (.setHeader "" "") 
+  ;        (.followRedirects HttpClient$Redirect/NORMAL)
+  ;        (.version HttpClient$Version/HTTP_2)
+  ;        (.build))
+
+  ;    res (.send client req (HttpResponse$BodyHandlers/ofString))]
+  ;(println res))
+
+    ;(let [my-cs (clj-http.cookies/cookie-store)]
+
+    ;    (client/with-middleware [#'clj-http.client/wrap-url
+    ;                      #'clj-http.client/wrap-redirects]
+    ;        (let [req (client/get "http://twitter.com/i/search/timeline?f=tweets&q=Babylon+5&max_position=TWEET-1158518806706155520-1158595382965936128" {:headers h :cookie-store my-cs :cookie-policy :standard })]
+    ;            (prn req))
+    ;        )
+
+    ;)
+)
+
 
 (defn download [url filename]
     (let [body (httprequest url)]
@@ -170,6 +212,7 @@
 (defn fetchtweets [env session]
     (let [creds (map->UserCredentials env) screen_name (:screen_name env)]
         (log/info (str "fetch: " (merge {:screen_name screen_name} (timelineparams (loadsession screen_name)))))
+        ;(api/statuses-user-timeline creds :params (merge {:screen_name screen_name} (timelineparams (loadsession screen_name))))
         (let [formattedtweets (let [tweets (api/statuses-user-timeline creds :params (merge {:screen_name screen_name} (timelineparams (loadsession screen_name))))]
                 (map (fn [tweet] 
                         (let [  favorite_count (:favorite_count tweet) 
@@ -197,19 +240,35 @@
             (log/info (str "tweets count:" (count formattedtweets)))
             (if (> (count formattedtweets) 0)
                 (let [maxid (apply (resolve (symbol (paramsname (:stage (loadsession screen_name))))) (map read-string (map :id formattedtweets)))]
-                    (updatesession screen_name (assoc session :pending {:last_id maxid})))
+                    (updatesession screen_name (assoc session :pending {:last_id maxid :last_timestamp (:created_at (:object (last formattedtweets)))}))) ;TODO return max_id with timestamp
                 (if (= "init" (:stage (loadsession screen_name)))
-                    (doall (updatesession screen_name (assoc session :stage "normal"))
-                    (log/info (str "Init stage finished. Turn to the normal stage."))))
+                    (doall (updatesession screen_name {:watching (:watching session) :stage "normal"}) (log/info (str "Init stage finished. Turn to the normal stage.")))
+                    (updatesession screen_name {:watching (:watching session) :stage "normal"})
+                )
             )
             formattedtweets
         )
     )
 )
+
+(def time-to-seconds
+    { 
+      "minute" `60
+      "minutes" `60
+      "hour" `3600
+      "hours" `3600
+      "day" `86440
+      "days" `86440
+})
+
 (defn before [env]
     (log/info (str "call actionne_twitter/core.before for account: " (:screen_name env)))
-    (if (= {} (loadsession (:screen_name env)))
-        (initsession (:screen_name env))    
+    (let [watching (:watching env)]
+        (let [timevec (clojure.string/split watching #" ") ]
+            (if (= {} (loadsession (:screen_name env)))
+                (initsession (:screen_name env) (time-to-seconds (second timevec)))
+            )
+        )
     )
 )
 
@@ -218,7 +277,12 @@
     (log/info (str "call actionne_twitter/core.success for account: " (:screen_name env)))
     (let [session (loadsession (:screen_name env))]
         (if (not= (:pending session) nil) 
-           (updatesession (:screen_name env) (assoc session :confirmed (:pending session)))
+           (doall (println (str "last_timestamp: " (:last_timestamp (:pending session))))
+            (if (> (- (- (/ (.getTime (new java.util.Date)) 1000) (:last_timestamp (:pending session))) (:watching session)) 0)
+                (updatesession (:screen_name env) {:watching (:watching session) :stage (:stage session)})
+                (updatesession (:screen_name env) (assoc session :confirmed (:pending session)))
+            )
+           )
         )
     )
 )
