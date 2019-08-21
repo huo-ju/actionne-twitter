@@ -2,6 +2,8 @@
     (:require
             [clojure.tools.logging :as log]
             [config.core :refer [env]]
+            [hickory.core :as hickory]
+            [hickory.select :as s]
             [twttr.api :as api]
             [twttr.auth :refer :all]
             [cheshire.core :refer :all]
@@ -99,41 +101,82 @@
 
 (def h {"User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.86 Safari/537.36" }) 
 
+(defn extratext [inputcontent]
+    (clojure.string/join " " (map (fn [t] 
+        (if (= (type t) java.lang.String)
+            t
+            (if (= (type (:content t)) clojure.lang.PersistentVector) (apply str (:content t)) (extratext (first (:content t))))
+        )
+        ) inputcontent))
+)
+
+(defn parsenode [htmlnode]
+        (let [id (-> (s/select (s/child (s/tag :li)) htmlnode) first :attrs :data-item-id)
+            text (-> (s/select (s/and (s/class "tweet-text") (s/tag :p)) htmlnode) first :content)
+            created_at (-> (s/select (s/and (s/class "_timestamp") (s/tag :span)) htmlnode) first :attrs :data-time)
+            retweet_count (-> (s/select (s/child (s/class "ProfileTweet-action--retweet") (s/class "ProfileTweet-actionCount")) htmlnode) first :attrs :data-tweet-stat-count)
+            favorite_count (-> (s/select (s/child (s/class "ProfileTweet-action--favorite") (s/class "ProfileTweet-actionCount")) htmlnode) first :attrs :data-tweet-stat-count)
+            content (-> (s/select (s/child (s/tag :li)) htmlnode) first :content)
+            tweetattrs (-> (s/select (s/child (s/and (s/attr :data-component-context) (s/tag :div))) htmlnode) first :attrs)
+
+            imgs (-> (s/select (s/child (s/and (s/class "AdaptiveMedia-photoContainer") (s/tag :div)) (s/tag :img)) htmlnode) )
+            
+             ]
+
+            {
+                    :id id
+                    :object {
+                        :id id :favorite_count favorite_count :retweet_count retweet_count :created_at created_at 
+                        :text (extratext text)
+                        :category (cond 
+                            (= "true" (:data-is-reply-to tweetattrs)) "reply" 
+                            (not (nil? (:data-retweet-id tweetattrs))) "retweet" 
+                        :else "tweet")
+                        :media_urls (into [] (map (fn [img]  (:src (:attrs img)) ) imgs))
+                    }
+                    :original {
+                        :id_str (str id) :favorite_count favorite_count :retweet_count retweet_count :created_at created_at 
+                        :text (extratext text) 
+                        :extended_entities { :media (into [] (map (fn [img] {:media_url_https (:src (:attrs img)) :type "photo"}) imgs))}
+                    }
+                }
+        )
+)
+
 (defn gettweets []
     (let [cookie-handler (CookieManager.)]
         (def client (http/build-client {:follow-redirects :normal :cookie-handler cookie-handler :headers {"User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.86 Safari/537.36" }}))
-        (let [resp (http/send {:uri "http://twitter.com/i/search/timeline?f=tweets&q=Babylon+5&max_position=TWEET-1158518806706155520-1158595382965936128" :method :get} {:client client})] 
+        (let [resp (http/send {:uri "http://twitter.com/i/search/timeline?f=tweets&q=from:virushuo%20include:nativeretweets&max_position=TWEET-1158518806706155520-1158595382965936128" :method :get} {:client client})] 
             (if (= (:status resp) 200)
-                (prn (parse-string (:body resp)))
+                (doall ;(prn (parse-string (:body resp)))
+                    (println "=================")
+                    ;(println (type (parse-string (:body resp))))
+                    (some
+                        (fn [v]  
+                            (if (= (key v) "items_html")
+                                (prn (map (fn [input] 
+                                    ;(println "===input data")
+                                    ;(prn input)
+                                    (let [htmlnodes (hickory.core/as-hickory input) ]
+                                        ;(println "======htmlnodes") 
+                                        ;(prn htmlnodes)
+                                        (if (= (type htmlnodes) clojure.lang.PersistentArrayMap)
+                                            (parsenode htmlnodes)
+                                        )
+                                )
+                                ) (hickory.core/parse-fragment (val v))))
+                            )
+                        ) 
+                    (parse-string (:body resp)))
+                    ;(prn (:items_html (parse-string (:body resp))))
+                )
+
                 ;(let [ elems (get-elems (:body resp) "")]
                 ;    (prn elems)
                 ;)
             )
         )
     )
-  ;  (let [req (-> (HttpRequest/newBuilder)
-  ;        (.uri (URI/create "http://twitter.com/i/search/timeline?f=tweets&q=Babylon+5&max_position=TWEET-1158518806706155520-1158595382965936128"))
-  ;        (.GET)
-  ;        (.build))
-
-  ;    client (-> (HttpClient/newBuilder)
-  ;        (.setHeader "" "") 
-  ;        (.followRedirects HttpClient$Redirect/NORMAL)
-  ;        (.version HttpClient$Version/HTTP_2)
-  ;        (.build))
-
-  ;    res (.send client req (HttpResponse$BodyHandlers/ofString))]
-  ;(println res))
-
-    ;(let [my-cs (clj-http.cookies/cookie-store)]
-
-    ;    (client/with-middleware [#'clj-http.client/wrap-url
-    ;                      #'clj-http.client/wrap-redirects]
-    ;        (let [req (client/get "http://twitter.com/i/search/timeline?f=tweets&q=Babylon+5&max_position=TWEET-1158518806706155520-1158595382965936128" {:headers h :cookie-store my-cs :cookie-policy :standard })]
-    ;            (prn req))
-    ;        )
-
-    ;)
 )
 
 
@@ -277,10 +320,12 @@
     (log/info (str "call actionne_twitter/core.success for account: " (:screen_name env)))
     (let [session (loadsession (:screen_name env))]
         (if (not= (:pending session) nil) 
-           (doall (println (str "last_timestamp: " (:last_timestamp (:pending session))))
-            (if (> (- (- (/ (.getTime (new java.util.Date)) 1000) (:last_timestamp (:pending session))) (:watching session)) 0)
-                (updatesession (:screen_name env) {:watching (:watching session) :stage (:stage session)})
-                (updatesession (:screen_name env) (assoc session :confirmed (:pending session)))
+           (doall 
+                (let [watching (if (nil? (:watching session)) 86440 (:watching session))]  ;default watching range is 5 days
+                    (if (> (- (- (/ (.getTime (new java.util.Date)) 1000) (:last_timestamp (:pending session))) (:watching session)) 0)
+                    (updatesession (:screen_name env) {:watching (:watching session) :stage (:stage session)})
+                    (updatesession (:screen_name env) (assoc session :confirmed (:pending session)))
+                )
             )
            )
         )
