@@ -146,7 +146,8 @@
 (defn gettweets []
     (let [cookie-handler (CookieManager.)]
         (def client (http/build-client {:follow-redirects :normal :cookie-handler cookie-handler :headers {"User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.86 Safari/537.36" }}))
-        (let [resp (http/send {:uri "http://twitter.com/i/search/timeline?f=tweets&q=from:virushuo%20include:nativeretweets&max_position=TWEET-1158518806706155520-1158595382965936128" :method :get} {:client client})] 
+;&max_position=TWEET-1158518806706155520-1158595382965936128
+        (let [resp (http/send {:uri "http://twitter.com/i/search/timeline?f=tweets&q=from:virushuo%20include:nativeretweets" :method :get} {:client client})] 
             (if (= (:status resp) 200)
                 (doall ;(prn (parse-string (:body resp)))
                     (println "=================")
@@ -154,7 +155,7 @@
                     (some
                         (fn [v]  
                             (if (= (key v) "items_html")
-                                (prn (map (fn [input] 
+                                (let [formattedtweets (map (fn [input] 
                                     ;(println "===input data")
                                     ;(prn input)
                                     (let [htmlnodes (hickory.core/as-hickory input) ]
@@ -163,11 +164,17 @@
                                         (if (= (type htmlnodes) clojure.lang.PersistentArrayMap)
                                             (parsenode htmlnodes)
                                         )
+                                )) (hickory.core/parse-fragment (val v)))]
+                                    (let [min_id (apply min (map read-string (map :id  (remove nil? formattedtweets))))]
+                                        (println (str "====minid:" min_id))
+                                        ;(println {:last_id min_id :last_timestamp (:created_at (last formattedtweets))})
+
+                                        ;TODO  save session;(updatesession screen_name (assoc session :pending {:last_id maxid :last_timestamp (apply min (map read-string (map (fn [tweet]  (:created_at (:object tweet))) (remove nil? formattedtweets))))}))) 
+                                    )
                                 )
-                                ) (hickory.core/parse-fragment (val v))))
-                            )
-                        ) 
-                    (parse-string (:body resp)))
+                                (doall (println "======v")
+                                (prn v))
+                                )) (parse-string (:body resp)))
                     ;(prn (:items_html (parse-string (:body resp))))
                 )
 
