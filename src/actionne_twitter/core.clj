@@ -143,8 +143,8 @@
         )
 )
 
-(defn gettweets []
-    (let [cookie-handler (CookieManager.)]
+(defn gettweets [env session]
+    (let [cookie-handler (CookieManager.) screen_name (:screen_name env)]
         (def client (http/build-client {:follow-redirects :normal :cookie-handler cookie-handler :headers {"User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.86 Safari/537.36" }}))
 ;&max_position=TWEET-1158518806706155520-1158595382965936128
         (let [resp (http/send {:uri "http://twitter.com/i/search/timeline?f=tweets&q=from:virushuo%20include:nativeretweets" :method :get} {:client client})] 
@@ -165,13 +165,19 @@
                                             (parsenode htmlnodes)
                                         )
                                 )) (hickory.core/parse-fragment (val v)))]
-                                    (let [min_id (apply min (map read-string (map :id  (remove nil? formattedtweets))))]
-                                        (println (str "====minid:" min_id))
-                                        ;(println {:last_id min_id :last_timestamp (:created_at (last formattedtweets))})
-
-                                        ;TODO  save session;(updatesession screen_name (assoc session :pending {:last_id maxid :last_timestamp (apply min (map read-string (map (fn [tweet]  (:created_at (:object tweet))) (remove nil? formattedtweets))))}))) 
-                                    )
-                                )
+                                    (let [resulttweets (remove nil? formattedtweets)]
+                                        (let [min_id (apply min (map read-string (map :id resulttweets)))
+                                              last_timestamp (apply min (map read-string (map (fn [tweet] (:created_at (:object tweet))) resulttweets)))]
+                                            (println (str "====minid:" min_id))
+                                            (println (str "====last_timestamp:" last_timestamp))
+                                            (updatesession screen_name (assoc session :pending {:last_id min_id :last_timestamp last_timestamp })) 
+                                            
+                                            
+                                            ;(println {:last_id min_id :last_timestamp (:created_at (last formattedtweets))})
+                                            ;TODO  save session;(updatesession screen_name (assoc session :pending {:last_id maxid :last_timestamp }))) 
+                                        )
+                                        (prn formattedtweets)
+                                    ))
                                 (doall (println "======v")
                                 (prn v))
                                 )) (parse-string (:body resp)))
@@ -329,7 +335,7 @@
         (if (not= (:pending session) nil) 
            (doall 
                 (let [watching (if (nil? (:watching session)) 86440 (:watching session))]  ;default watching range is 5 days
-                    (if (> (- (- (/ (.getTime (new java.util.Date)) 1000) (:last_timestamp (:pending session))) (:watching session)) 0)
+                    (if (and (= (:stage session) "normal") (> (- (- (/ (.getTime (new java.util.Date)) 1000) (:last_timestamp (:pending session))) (:watching session)) 0))
                     (updatesession (:screen_name env) {:watching (:watching session) :stage (:stage session)})
                     (updatesession (:screen_name env) (assoc session :confirmed (:pending session)))
                 )
@@ -348,6 +354,14 @@
     (log/info (str "call actionne_twitter/core.run for account: " (:screen_name env)))
     (let [session (loadsession (:screen_name env))]
        (fetchtweets env session)
+    )
+)
+
+
+(defn run2 [env]
+    (log/info (str "call actionne_twitter/core.run for account: " (:screen_name env)))
+    (let [session (loadsession (:screen_name env))]
+       (gettweets env session)
     )
 )
 
