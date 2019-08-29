@@ -11,7 +11,7 @@
             [clojure.java.io :as io]
             [java-http-clj.core  :as http ]
     )
-    (:import (java.io BufferedWriter FileWriter) (java.util Date Locale) (java.net CookieManager ProxySelector URI) (org.jsoup Jsoup) (org.jsoup.select Elements) (org.jsoup.nodes Element))
+    (:import (java.io BufferedWriter FileWriter) (java.util Date Locale) (java.net CookieManager ProxySelector URI URLEncoder) (org.jsoup Jsoup) (org.jsoup.select Elements) (org.jsoup.nodes Element) )
 )
 
 (defn expand-home [s]
@@ -60,7 +60,7 @@
 )
 
 (defn initsession [account watching]
-    (updatesession account {:stage "init" :watching watching})
+    (updatesession account {:stage "init" :method "api" :watching watching})
 )
 
 (defn paramsname [stage]
@@ -126,7 +126,7 @@
             {
                     :id id
                     :object {
-                        :id id :favorite_count favorite_count :retweet_count retweet_count :created_at created_at 
+                        :id id :favorite_count (Integer/parseInt favorite_count) :retweet_count (Integer/parseInt retweet_count) :created_at (Integer/parseInt created_at)
                         :text (extratext text)
                         :category (cond 
                             (= "true" (:data-is-reply-to tweetattrs)) "reply" 
@@ -143,55 +143,58 @@
         )
 )
 
-(defn gettweets [env session]
-    (let [cookie-handler (CookieManager.) screen_name (:screen_name env)]
+(defn fetchtweetsweb [env session]
+    (let [cookie-handler (CookieManager.) screen_name (:screen_name env) search_term (:search_term env)]
         (def client (http/build-client {:follow-redirects :normal :cookie-handler cookie-handler :headers {"User-Agent" "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/46.0.2490.86 Safari/537.36" }}))
-;&max_position=TWEET-1158518806706155520-1158595382965936128
-        (let [resp (http/send {:uri "http://twitter.com/i/search/timeline?f=tweets&q=from:virushuo%20include:nativeretweets" :method :get} {:client client})] 
-            (if (= (:status resp) 200)
-                (doall ;(prn (parse-string (:body resp)))
-                    (println "=================")
-                    ;(println (type (parse-string (:body resp))))
-                    (some
-                        (fn [v]  
-                            (if (= (key v) "items_html")
-                                (let [formattedtweets (map (fn [input] 
-                                    ;(println "===input data")
-                                    ;(prn input)
-                                    (let [htmlnodes (hickory.core/as-hickory input) ]
-                                        ;(println "======htmlnodes") 
-                                        ;(prn htmlnodes)
-                                        (if (= (type htmlnodes) clojure.lang.PersistentArrayMap)
-                                            (parsenode htmlnodes)
-                                        )
-                                )) (hickory.core/parse-fragment (val v)))]
-                                    (let [resulttweets (remove nil? formattedtweets)]
-                                        (let [min_id (apply min (map read-string (map :id resulttweets)))
-                                              last_timestamp (apply min (map read-string (map (fn [tweet] (:created_at (:object tweet))) resulttweets)))]
-                                            (println (str "====minid:" min_id))
-                                            (println (str "====last_timestamp:" last_timestamp))
-                                            (updatesession screen_name (assoc session :pending {:last_id min_id :last_timestamp last_timestamp })) 
-                                            
-                                            
-                                            ;(println {:last_id min_id :last_timestamp (:created_at (last formattedtweets))})
-                                            ;TODO  save session;(updatesession screen_name (assoc session :pending {:last_id maxid :last_timestamp }))) 
-                                        )
-                                        (prn formattedtweets)
-                                    ))
-                                (doall (println "======v")
-                                (prn v))
-                                )) (parse-string (:body resp)))
-                    ;(prn (:items_html (parse-string (:body resp))))
-                )
 
-                ;(let [ elems (get-elems (:body resp) "")]
-                ;    (prn elems)
-                ;)
-            )
-        )
-    )
-)
+        (if (= "web" (:method session))
+            (let [uri (format "http://twitter.com/i/search/timeline?f=tweets&q=%s%%20include:nativeretweets%s" (URLEncoder/encode 
+                (if (not (nil? (:last_tweet_timestamp (:confirmed session))))
+                    (str search_term " until:" (.format (java.text.SimpleDateFormat. "yyyy-MM-dd") (* 1000 (:last_tweet_timestamp (:confirmed session))))) 
+                    search_term
+                ) "UTF-8")
+            (if (not (nil? (:last_id (:confirmed session))))
+                (str "&max_position=" (:last_id (:confirmed session)))
+                "&max_position="
+            ))]
+                (println (str "url:" uri))
+                (let [resp (http/send {:uri uri :method :get} {:client client})] 
+                    (if (= (:status resp) 200)
+                        (do 
+                            (some
+                                (fn [v]  
+                                    (if (= (key v) "items_html")
+                                        (let [tweets (map (fn [input] 
+                                            (let [htmlnodes (hickory.core/as-hickory input) ]
+                                                (if (= (type htmlnodes) clojure.lang.PersistentArrayMap)
+                                                    (parsenode htmlnodes)
+                                                )
+                                        )) (hickory.core/parse-fragment (val v)))]
+                                            (let [formattedtweets (remove nil? tweets)]
+                                                (log/info (str "tweets count:" (count formattedtweets)))
+                                                (let [
+                                                        last_tweet_date (.format (java.text.SimpleDateFormat. "yyyy-MM-dd") (* 1000 (:created_at (:object (last formattedtweets)))))
+                                                        first_tweet_timestamp (/ (inst-ms (.parse (java.text.SimpleDateFormat. "yyyy-MM-dd") (:first_tweet env))) 1000)
+                                                        last_tweet_timestamp (:created_at (:object (last formattedtweets)))
+                                                      ]
 
+                                                    (if  (= (count formattedtweets) 0) 
+                                                        (if (not (< first_tweet_timestamp last_tweet_timestamp))
+                                                            (if (= "init" (:stage (loadsession screen_name)))
+                                                                (do (updatesession screen_name {:watching (:watching session) :stage "normal" :method "api"}) (log/info (str "web fetch tweets finished. Turn to the normal api mode.")))
+                                                                (updatesession screen_name {:watching (:watching session) :stage "normal" :method "api"})
+                                                            )
+                                                            (let [current_session (loadsession screen_name)]
+                                                                (updatesession screen_name (assoc current_session :pending (assoc (:pending current_session) :last_tweet_timestamp  (- last_tweet_timestamp 86400)))))
+                                                        
+                                                        )))
+                                                formattedtweets 
+                                            ))
+                                        (do 
+                                            (if (= (key v) "min_position")
+                                               (do  
+                                                (let [current_session (loadsession screen_name)]
+                                                    (updatesession screen_name (assoc current_session :pending (assoc (:pending current_session) :last_id (val v)))))))))) (parse-string (:body resp))))))))))
 
 (defn download [url filename]
     (let [body (httprequest url)]
@@ -220,16 +223,20 @@
     )
 )
 (defn deletetweet [id env]
-    (try
-        (let [creds (map->UserCredentials env) screen_name (:screen_name env)]
-            (log/info (str "delete tweet: " id ))
-            (api/statuses-destroy-id creds :params {:id id})
+    (let [session (loadsession (:screen_name env))]
+
+        (try
+            (let [creds (map->UserCredentials env) screen_name (:screen_name env)]
+                (log/info (str "delete tweet: " id ))
+                (api/statuses-destroy-id creds :params {:id id})
+                nil
+            )
+        (catch Exception e 
+            (log/error (str "delete tweet: " id " " (:cause (Throwable->map e))))
             nil
-        )
-    (catch Exception e 
-        (log/error (str "delete tweet: " id " " (:cause (Throwable->map e))))
-        nil
-    ))
+        ))
+    )
+    
 )
 
 (defn delete [config id original]
@@ -265,10 +272,9 @@
 
 
 
-(defn fetchtweets [env session]
-    (let [creds (map->UserCredentials env) screen_name (:screen_name env)]
+(defn fetchtweetsapi [env session]
+    (let [creds (map->UserCredentials env) screen_name (:screen_name env) method (:method env)]
         (log/info (str "fetch: " (merge {:screen_name screen_name} (timelineparams (loadsession screen_name)))))
-        ;(api/statuses-user-timeline creds :params (merge {:screen_name screen_name} (timelineparams (loadsession screen_name))))
         (let [formattedtweets (let [tweets (api/statuses-user-timeline creds :params (merge {:screen_name screen_name} (timelineparams (loadsession screen_name))))]
                 (map (fn [tweet] 
                         (let [  favorite_count (:favorite_count tweet) 
@@ -298,8 +304,8 @@
                 (let [maxid (apply (resolve (symbol (paramsname (:stage (loadsession screen_name))))) (map read-string (map :id formattedtweets)))]
                     (updatesession screen_name (assoc session :pending {:last_id maxid :last_timestamp (:created_at (:object (last formattedtweets)))}))) ;TODO return max_id with timestamp
                 (if (= "init" (:stage (loadsession screen_name)))
-                    (doall (updatesession screen_name {:watching (:watching session) :stage "normal"}) (log/info (str "Init stage finished. Turn to the normal stage.")))
-                    (updatesession screen_name {:watching (:watching session) :stage "normal"})
+                    (do (updatesession screen_name {:watching (:watching session) :stage "init" :method "web"}) (log/info (str "api fetch tweets finished. Turn to the web mode.")))
+                    (updatesession screen_name {:watching (:watching session) :stage "normal" :method "api"})
                 )
             )
             formattedtweets
@@ -350,18 +356,23 @@
 )
 
 
+;(defn run [env]
+;    (log/info (str "call actionne_twitter/core.run for account: " (:screen_name env)))
+;    (let [session (loadsession (:screen_name env))]
+;       (fetchtweets env session)
+;    )
+;)
+
+
 (defn run [env]
     (log/info (str "call actionne_twitter/core.run for account: " (:screen_name env)))
     (let [session (loadsession (:screen_name env))]
-       (fetchtweets env session)
-    )
-)
-
-
-(defn run2 [env]
-    (log/info (str "call actionne_twitter/core.run for account: " (:screen_name env)))
-    (let [session (loadsession (:screen_name env))]
-       (gettweets env session)
+        (cond 
+            (= "api" (:method session))
+                (fetchtweetsapi env session)
+            (= "web" (:method session))
+                (fetchtweetsweb env session)
+        )
     )
 )
 
