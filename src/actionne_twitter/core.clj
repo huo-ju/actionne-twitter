@@ -299,7 +299,9 @@
     (let [pincode (read-line)]
       (let [creds (oauth/access-token consumer request-token pincode)]
         (if (some? (:oauth_token creds))
-          (do (log/info (str "Oauth Success. Save users credentials.")) (savecredentials creds account) creds)
+          (do (log/info (str "Oauth Success. Save users credentials."))
+              (let [formattedcreds {:screen_name (:screen_name creds) :user-token (:oauth_token creds) :user-token-secret (:oauth_token_secret creds)}]
+                (savecredentials formattedcreds account) formattedcreds))
           (log/info (str "Oauth failure. Please try again later.")))))))
 
 (defn startcheck [env]
