@@ -9,7 +9,8 @@
             [cheshire.core :refer :all]
             [clj-http.client :as client]
             [clojure.java.io :as io]
-            [java-http-clj.core  :as http ]
+            [java-http-clj.core  :as http]
+            [oauth.client :as oauth]
     )
     (:import (java.io BufferedWriter FileWriter) (java.util Date Locale) (java.net CookieManager ProxySelector URI URLEncoder) (org.jsoup Jsoup) (org.jsoup.select Elements) (org.jsoup.nodes Element) )
 )
@@ -20,7 +21,7 @@
     s))
 
 (def homedir 
-  (expand-home (or (env :actionne-home) "~/actionne")))
+  (expand-home (or (:homedir env) "~/actionne")))
 
 (def today
     (.format (java.text.SimpleDateFormat. "yyyy-MM-dd") (new java.util.Date))
@@ -49,6 +50,8 @@
     )
 )
 
+
+
 (defn updatesession [account session]
     (log/info (str "updatesession: " homedir "/data/" account "-actionne_twitter-session.clj"))
     (log/info (str "session: " session))
@@ -58,6 +61,26 @@
         (pr session)))
     )
 )
+
+(defn loadcredentials [env]
+    (let [filename (str homedir "/data/"  (:screen_name env) "-credentials.clj")]
+        (try
+            (assoc (read-string (slurp filename)) :consumer-key (:consumer-key env) :consumer-secret (:consumer-secret env))
+            (catch Exception e 
+            (log/error (str "loadcredentials error: " (:cause (Throwable->map e))))
+            {}))
+    )
+)
+
+(defn savecredentials [creds account]
+    (log/info (str "savecredentials: " homedir "/data/" account "-credentials.clj"))
+    (let [filename (str homedir "/data/" account "-credentials.clj")]
+        (with-open [w (clojure.java.io/writer filename)]
+            (binding [*out* w]
+        (pr creds)))
+    )
+)
+
 
 (defn initsession [account watching]
     (updatesession account {:stage "init" :method "api" :watching watching})
@@ -151,13 +174,14 @@
             (let [uri (format "http://twitter.com/i/search/timeline?f=tweets&q=%s%%20include:nativeretweets%s" (URLEncoder/encode 
                 (if (not (nil? (:last_tweet_timestamp (:confirmed session))))
                     (str search_term " until:" (.format (java.text.SimpleDateFormat. "yyyy-MM-dd") (* 1000 (:last_tweet_timestamp (:confirmed session))))) 
-                    search_term
+
+                    (str search_term " until:" (:lastest_tweet env)) 
                 ) "UTF-8")
             (if (not (nil? (:last_id (:confirmed session))))
                 (str "&max_position=" (:last_id (:confirmed session)))
                 "&max_position="
             ))]
-                (println (str "url:" uri))
+                (log/info (str "fetch url:" uri))
                 (let [resp (http/send {:uri uri :method :get} {:client client})] 
                     (if (= (:status resp) 200)
                         (do 
@@ -173,12 +197,14 @@
                                             (let [formattedtweets (remove nil? tweets)]
                                                 (log/info (str "tweets count:" (count formattedtweets)))
                                                 (let [
-                                                        last_tweet_date (.format (java.text.SimpleDateFormat. "yyyy-MM-dd") (* 1000 (:created_at (:object (last formattedtweets)))))
                                                         first_tweet_timestamp (/ (inst-ms (.parse (java.text.SimpleDateFormat. "yyyy-MM-dd") (:first_tweet env))) 1000)
-                                                        last_tweet_timestamp (:created_at (:object (last formattedtweets)))
+                                                        last_tweet_timestamp 
+                                                                (if (> (count formattedtweets) 0)
+                                                                    (:created_at (:object (last formattedtweets)))
+                                                                    (/ (inst-ms (.parse (java.text.SimpleDateFormat. "yyyy-MM-dd") (:lastest_tweet env))) 1000))
                                                       ]
 
-                                                    (if  (= (count formattedtweets) 0) 
+                                                    (if (= (count formattedtweets) 0) 
                                                         (if (not (< first_tweet_timestamp last_tweet_timestamp))
                                                             (if (= "init" (:stage (loadsession screen_name)))
                                                                 (do (updatesession screen_name {:watching (:watching session) :stage "normal" :method "api"}) (log/info (str "web fetch tweets finished. Turn to the normal api mode.")))
@@ -224,9 +250,8 @@
 )
 (defn deletetweet [id env]
     (let [session (loadsession (:screen_name env))]
-
         (try
-            (let [creds (map->UserCredentials env) screen_name (:screen_name env)]
+            (let [creds (map->UserCredentials (loadcredentials env)) screen_name (:screen_name env)]
                 (log/info (str "delete tweet: " id ))
                 (api/statuses-destroy-id creds :params {:id id})
                 nil
@@ -270,10 +295,8 @@
 )
 
 
-
-
 (defn fetchtweetsapi [env session]
-    (let [creds (map->UserCredentials env) screen_name (:screen_name env) method (:method env)]
+    (let [creds (map->UserCredentials (loadcredentials env)) screen_name (:screen_name env) method (:method env)]
         (log/info (str "fetch: " (merge {:screen_name screen_name} (timelineparams (loadsession screen_name)))))
         (let [formattedtweets (let [tweets (api/statuses-user-timeline creds :params (merge {:screen_name screen_name} (timelineparams (loadsession screen_name))))]
                 (map (fn [tweet] 
@@ -376,3 +399,43 @@
     )
 )
 
+(defn runoauth [consumer account]
+    (let [request-token (oauth/request-token consumer "oob")]
+        (println (str "Please visit this link, click the 'Authorize access' button and paste PIN number back: " "https://api.twitter.com/oauth/authorize?oauth_token=" (:oauth_token request-token)))
+        (let [pincode (read-line)]
+            (let [creds (oauth/access-token consumer request-token pincode)]
+                (if (some? (:oauth_token creds))
+                    (do (log/info (str "Oauth Success. Save users credentials.")) (savecredentials creds account) creds)
+                    (log/info (str "Oauth failure. Please try again later."))
+                )
+            )
+        )
+    )
+)
+
+
+(defn startcheck [env]
+    (log/info (str "call actionne_twitter/core.startcheck for account: " (:screen_name env)))
+    (prn env)
+    (let [creds (loadcredentials env)]
+        (if (= (:screen_name creds) (:screen_name env))
+            true
+            (do (if (and (some? (:consumer-key env)) (some? (:consumer-secret env)))
+                   (let [consumer  (oauth/make-consumer (:consumer-key env) (:consumer-secret env)
+                                               "https://api.twitter.com/oauth/request_token"
+                                               "https://api.twitter.com/oauth/access_token"
+                                               "https://api.twitter.com/oauth/authorize"
+                                                   :hmac-sha1)]
+                    
+                    (log/info (str "User Credentials not found, start twitter auth." ))
+            
+                    (let [creds (runoauth consumer (:screen_name env))]
+                        (if (= (:screen_name creds) (:screen_name env))
+                            true
+                            false
+                        )
+                    ))
+                    (log/info (str "User Credentials found: " (:screen_name env)))
+                )
+            )
+        )))
